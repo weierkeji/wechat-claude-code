@@ -319,6 +319,62 @@ function extractTextFromMessage(msg: WeixinMessage): string {
   return "";
 }
 
+// ── Model Switching ───────────────────────────────────────────────────────────
+
+const MODEL_MAP: Record<string, { id: string; label: string }> = {
+  sonnet:  { id: "claude-sonnet-4-6",          label: "Sonnet 4.6 · 日常任务首选" },
+  opus:    { id: "claude-opus-4-6",             label: "Opus 4.6 · 复杂任务最强" },
+  haiku:   { id: "claude-haiku-4-5-20251001",   label: "Haiku 4.5 · 最快速轻量" },
+};
+
+const SETTINGS_FILE = path.join(
+  process.env.HOME || process.env.USERPROFILE || "~",
+  ".claude",
+  "settings.json",
+);
+
+function readSettings(): Record<string, unknown> {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function writeSettings(settings: Record<string, unknown>): void {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), "utf-8");
+}
+
+function handleCommand(text: string): string | null {
+  const trimmed = text.trim();
+
+  if (trimmed === "/model" || trimmed === "/model list") {
+    const current = (readSettings().model as string) || "claude-sonnet-4-6";
+    const lines = ["可用模型："];
+    for (const [alias, info] of Object.entries(MODEL_MAP)) {
+      const mark = info.id === current ? " ✓" : "";
+      lines.push(`  /model ${alias}  →  ${info.label}${mark}`);
+    }
+    lines.push("\n切换后重启 Claude Code 会话生效");
+    return lines.join("\n");
+  }
+
+  const match = trimmed.match(/^\/model\s+(\S+)$/i);
+  if (match) {
+    const alias = match[1].toLowerCase();
+    const model = MODEL_MAP[alias];
+    if (!model) {
+      return `未知模型: ${alias}\n发送 /model 查看可用选项`;
+    }
+    const settings = readSettings();
+    settings.model = model.id;
+    writeSettings(settings);
+    return `✅ 模型已切换为 ${model.label}\n重启 Claude Code 会话后生效`;
+  }
+
+  return null;
+}
+
 // ── Context Token Cache ──────────────────────────────────────────────────────
 
 const contextTokenCache = new Map<string, string>();
@@ -553,6 +609,16 @@ async function startPolling(account: AccountData): Promise<never> {
         }
 
         log(`收到消息: from=${senderId} text=${text.slice(0, 50)}...`);
+
+        // Check for bot commands (e.g. /model)
+        const commandReply = handleCommand(text);
+        if (commandReply) {
+          const ctxToken = getCachedContextToken(senderId);
+          if (ctxToken) {
+            await sendTextMessage(baseUrl, token, senderId, commandReply, ctxToken);
+          }
+          continue;
+        }
 
         // Push to Claude Code session
         await mcp.notification({
